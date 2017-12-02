@@ -3,6 +3,9 @@ import autograd.numpy as np
 import scipy, scipy.optimize
 import pdb
 from causal_frl_newest.causal_frl.distributions import truncated_normal
+import itertools, copy
+import python_utils.python_utils.basic as basic
+
 
 ignore_c = False
 #ignore_c = True
@@ -52,7 +55,6 @@ def truncated_normal_E_x(mu, prec):
 #        return np.array([])
         try:
             ans = truncated_normal.mean((mu, prec))
-            #print ans
             return ans
         except:
             pdb.set_trace()
@@ -88,6 +90,11 @@ def ls_to_zs(ls):
     zs = np.zeros(ls.shape)
     zs[np.arange(len(ls)), np.argmax(ls, axis=1)] = 1
     zs[ts_bool,:] = 0
+    return zs
+
+def cs_to_zs(cs):
+    zs = np.zeros(cs.shape)
+    zs[np.arange(len(cs)), np.argmax(cs, axis=1)] = 1
     return zs
 
 def zs_to_ls(zs):
@@ -244,6 +251,7 @@ def dF_fs_dv_and_dlam(alphas_prec_ys, betas_prec_ys, mu_c, prec_c, v, lam, ls, y
 
 #    v_bar, lam_bar = v_bar_and_lam_bar(alphas_prec_ys, betas_prec_ys, mu_c, prec_c, v, lam, ls, ys, K, cov_fs)
     v_bar, lam_bar = v_bar_and_lam_bar(alphas_prec_ys, betas_prec_ys, mu_c, prec_c, v, lam**2, ls, ys, K=K, K_factors=K_factors, cov_fs=cov_fs)
+
     dF_fs_dv = np.dot(K, (v - v_bar))
 #    dF_fs_dlam = 0.5 * np.dot(cov_fs * cov_fs, lam - lam_bar)
     dF_fs_dlam = 0.5 * np.dot(cov_fs * cov_fs, lam**2 - lam_bar)
@@ -397,9 +405,10 @@ def variational_c_posterior(alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0,
         new_F = F(alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0, alphas_prec_ys, betas_prec_ys, new_mu_c, new_prec_c, v, lam, ls, ys, K)
         print 'q_c', 'new_F:', new_F, 'old_F', old_F
         if new_F > old_F:
-            print 'bad'
-#            pdb.set_trace()
-        #assert new_F <= old_F
+
+            print 'q_c does not decrease, increase:', new_F - old_F
+#        assert new_F <= old_F
+
 
     return new_mu_c, new_prec_c
 
@@ -469,6 +478,8 @@ def variational_posterior(num_tries, max_iter, alphas_prec_ys_0, betas_prec_ys_0
     for i in xrange(num_tries):
     
         # initialize variational params
+        state = np.random.get_state()
+
         np.random.seed(i)
         alphas_prec_ys = np.random.uniform(0.5, 2.0, size=np.shape(alphas_prec_ys_0)) # fix
         betas_prec_ys = np.random.uniform(0.5, 2.0, size=np.shape(alphas_prec_ys_0))
@@ -476,6 +487,8 @@ def variational_posterior(num_tries, max_iter, alphas_prec_ys_0, betas_prec_ys_0
         prec_c = np.diag(np.random.uniform(0.5, 2.0, size=L))
         v = np.random.normal(size=N)
         lam = np.random.uniform(0.5, 2., size=N)
+
+        np.random.set_state(state)
 
         old_posterior = None
     
@@ -522,6 +535,7 @@ def optimize_theta(theta_method, theta_num_tries, theta_max_iter, variational_nu
             K_inv_factors = k_inv_factors(theta, xs, xs)
             K_inv = None
         posterior, evidence = variational_posterior(variational_num_tries, variational_max_iter, alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0, ls, ys, K, K_factors=None, K_inv=None, K_inv_factors=None, inv_method='vanilla', log_det_method='vanilla', trace_method='direct', debug=False, eps=0.001)
+
         return evidence
     
     if theta_method != 'grid':
@@ -530,8 +544,13 @@ def optimize_theta(theta_method, theta_num_tries, theta_max_iter, variational_nu
         evidences = []
         
         for i in xrange(theta_num_tries):
+
+            state = np.random.get_state()
             np.random.seed(i)
-            result = scipy.optimize.minimize(objective, theta_init_f(), method=theta_method, options={'maxiter': theta_max_iter, 'disp':bool(debug)})
+            theta_init = theta_init_f()
+            np.random.set_state(state)
+            result = scipy.optimize.minimize(objective, theta_init, method=theta_method, options={'maxiter': theta_max_iter, 'disp':bool(debug)})
+
             theta = result['x']
             evidence = result['fun']
             thetas.append(theta)
@@ -566,6 +585,7 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
         zs = np.concatenate((all_zs[:,rule_idxs], np.ones((len(ys),1))), axis=1)
         treated_ls = np.sum(zs * ts, axis=0)
         control_ls = np.sum(zs * (ts==0).astype(int), axis=0)
+
         if debug: print 'treated_ls:', treated_ls, 'control_ls', control_ls
         if np.min(treated_ls) < min_support or np.min(control_ls) < min_support:
             return True
@@ -574,21 +594,27 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
     rule_idxss = []
     objectives = []
 
-    num_rules = all_zs.shape[1]
-    all_rule_idxs = np.arange(num_rules)
+
+    num_rules = all_cs.shape[1]
+    all_rule_idxs = np.arange(num_rules, dtype=int)
     
     for i in xrange(search_num_tries):
 
+        state = np.random.get_state()
         np.random.seed(i)
-        rule_idxs = rule_idxs_init_f
+        rule_idxs = rule_idxs_init_f()
+        np.random.set_state(state)
         old_objective = objective(rule_idxs)
             
         for j in xrange(search_num_iter):
 
+
+#            np.random.seed(j)
+
             old_rule_idxs = copy.deepcopy(rule_idxs)
 
             possible_moves = []
-            if len(rule_idxs) < all_zs.shape[1]:
+            if len(rule_idxs) < all_cs.shape[1]:
                 possible_moves.append('insert')
             if len(rule_idxs) > 0:
                 possible_moves.append('delete')
@@ -599,7 +625,12 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
             which_move = np.random.choice(possible_moves)
             
             if which_move == 'insert':
-                insert_rule_idx = np.random.choice([i for i in all_rule_idxs if i in rule_idxs])
+
+                insert_rule_idx = None
+                while (insert_rule_idx is None) or (insert_rule_idx in rule_idxs):
+                    insert_rule_idx = np.random.choice(all_rule_idxs)
+#                    insert_rule_idx = np.random.choice([i for i in all_rule_idxs if i in rule_idxs])
+
                 insert_pos = np.random.randint(0, len(rule_idxs)+1)
                 rule_idxs = np.insert(rule_idxs, insert_pos, insert_rule_idx)
 
@@ -608,7 +639,10 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
                 rule_idxs = np.delete(rule_idxs, delete_pos)
 
             if which_move == 'replace':
-                replace_rule_idx = np.random.choice([i for i in all_rule_idxs if i in rule_idxs])
+
+                replace_rule_idx = None
+                while (replace_rule_idx is None) or (replace_rule_idx in rule_idxs):
+                    replace_rule_idx = np.random.choice(all_rule_idxs)
                 replace_pos = np.random.randint(0, len(rule_idxs))
                 rule_idxs[replace_pos] = replace_rule_idx
 
@@ -617,6 +651,10 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
                 temp = rule_idxs[pos1]
                 rule_idxs[pos1] = rule_idxs[pos2]
                 rule_idxs[pos2] = temp
+
+
+            if debug: print 'move:', old_rule_idxs, which_move, rule_idxs
+
 
             if pre_reject(rule_idxs):
                 if debug: print 'pre_rejected'
@@ -636,6 +674,90 @@ def rule_search(search_num_tries, search_num_iter, theta_method, theta_num_tries
     best_i = np.argmin(objectives)
     return rule_idxss[best_i], objectives[best_i]
 
+
+def gaussian_K(theta, xs1, xs2):
+
+    sigma, mult = theta
+    
+    diff = xs1[:,np.newaxis,:] - xs2[np.newaxis,:,:]
+    norms = np.sum(diff * diff, axis=2)
+
+    K = (mult**2) * np.exp(-1. * norms / (2 * (sigma**2)))
+
+    return K
+
+dgaussian_K_dsigma = autograd.jacobian(gaussian_K, argnum=0)
+
+def split(proportion, all_cs, ts, ys, xs, es):
+    N_tr = int(len(ts) * proportion)
+    all_cs_tr, all_cs_te = all_cs[0:N_tr], all_cs[N_tr:]
+    ts_tr, ts_te = ts[0:N_tr], ts[N_tr:]
+    ys_tr, ys_te = ys[0:N_tr], ys[N_tr:]
+    xs_tr, xs_te = xs[0:N_tr], xs[N_tr:]
+    if not (es is None):
+        es_tr, es_te = es[0:N_tr], es[N_tr:]
+    else:
+        es_tr, es_te = None, None
+    return (all_cs_tr, ts_tr, ys_tr, xs_tr, es_tr), (all_cs_te, ts_te, ys_te, xs_te, es_te)
+
+class cfrl_predictor(object):
+
+    def __init__(self, rule_idxs, mu_c, prec_c):
+        self.rule_idxs, self.mu_c, self.prec_c = rule_idxs, mu_c, prec_c
+
+    def predict(self, all_cs, xs):
+        means = truncated_normal_E_x(self.mu_c, self.prec_c)
+        return np.dot(zs_to_ls(cs_to_zs(np.concatenate((all_cs[:,self.rule_idxs], np.ones((len(xs),1))), axis=1))), means)
+
+    def get_rule_idxs_hat(self):
+        return self.rule_idxs
+
+class cfrl_fitter(object):
+
+    def __init__(self, search_num_tries, search_num_iter, theta_method, theta_num_tries, theta_max_iter, variational_num_tries, variational_max_iter, alphas_prec_ys_0_f, betas_prec_ys_0_f, mu_c_0_f, prec_c_0_f, k, theta_init_f, rule_idxs_init_f, debug=False, theta_grid=None, min_support=2):
+        self.search_num_tries, self.search_num_iter, self.theta_method, self.theta_num_tries, self.theta_max_iter, self.variational_num_tries, self.variational_max_iter, self.alphas_prec_ys_0_f, self.betas_prec_ys_0_f, self.mu_c_0_f, self.prec_c_0_f, self.k, self.theta_init_f, self.rule_idxs_init_f, self.debug, self.theta_grid, self.min_support = search_num_tries, search_num_iter, theta_method, theta_num_tries, theta_max_iter, variational_num_tries, variational_max_iter, alphas_prec_ys_0_f, betas_prec_ys_0_f, mu_c_0_f, prec_c_0_f, k, theta_init_f, rule_idxs_init_f, debug, theta_grid, min_support
+        
+
+    def fit(self, all_cs, ts, ys, xs, rule_idxs=None):
+        rule_idxs_fit, objective = rule_search(self.search_num_tries, self.search_num_iter, self.theta_method, self.theta_num_tries, self.theta_max_iter, self.variational_num_tries, self.variational_max_iter, self.alphas_prec_ys_0_f, self.betas_prec_ys_0_f, self.mu_c_0_f, self.prec_c_0_f, all_cs, ts, ys, xs, self.k, self.theta_init_f, self.rule_idxs_init_f, self.debug, self.theta_grid, self.min_support)
+        alphas_prec_ys_0 = self.alphas_prec_ys_0_f(rule_idxs_fit)
+        betas_prec_ys_0 = self.betas_prec_ys_0_f(rule_idxs_fit)
+        mu_c_0 = self.mu_c_0_f(rule_idxs_fit)
+        prec_c_0 = self.prec_c_0_f(rule_idxs_fit)
+        ls = zs_to_ls(cs_to_zs(np.concatenate((all_cs[:,rule_idxs_fit], np.ones((len(ys),1))), axis=1))) * ts[:,np.newaxis]
+        theta_fit, evidence1 = optimize_theta(self.theta_method, self.theta_num_tries, self.theta_max_iter, self.variational_num_tries, self.variational_max_iter, alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0, ls, ys, xs, self.k, self.theta_init_f, self.debug, self.theta_grid)
+        K = self.k(theta_fit, xs, xs)
+        posterior, evidence2 = variational_posterior(self.variational_num_tries, self.variational_max_iter, alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0, ls, ys, K, debug=self.debug, eps=0.001)
+        assert evidence1 == evidence2
+        (alphas_prec_ys, betas_prec_ys, mu_c, prec_c, v, lam) = posterior
+        return cfrl_predictor(rule_idxs_fit, mu_c, prec_c)
+
+class basic_data_getter(object):
+
+    def __init__(self, data_dim, p_treat, p_match, num_rules, f, ds_getter, L, noise_sd):
+        self.data_dim, self.p_treat, self.p_match, self.num_rules, self.f, self.ds_getter, self.L, self.noise_sd = data_dim, p_treat, p_match, num_rules, f, ds_getter, L, noise_sd
+
+    def __call__(self, i, N):
+        state = np.random.get_state()
+        np.random.seed(i)
+        xs = np.random.normal(size=(N,self.data_dim))
+        ds = self.ds_getter(self.L)
+        all_cs = (np.random.uniform(size=(N,self.num_rules)) < self.p_match).astype(int)
+        ts = (np.random.uniform(size=N) < self.p_treat).astype(int)
+        rule_idxs = np.arange(self.L-1)
+        cs = np.concatenate((all_cs[:,rule_idxs], np.ones((N,1))), axis=1)
+        ls = fxns.zs_to_ls(fxns.cs_to_zs(cs))
+        es = np.dot(ls, ds)
+        fs = f(i, xs)
+        noises = np.random.normal(scale=self.noise_sd, size=N)
+        ys = (es * ts) + fs + noises
+        np.random.set_state(state)
+        return all_cs, ts, ys, xs, es, rule_idxs, ds
+
+"""
+"""
+
+
 def old_optimize_theta(grad_num_tries, grad_max_iter, variational_num_tries, variational_max_iter, alphas_prec_ys_0, betas_prec_ys_0, mu_c_0, prec_c_0, ls, ys, xs, k, k_grad, theta_init_f):
     # k's arguments are hyperparameter vector, xs1, xs2, returns kernel matrix
     # k_grad's arguments are the same
@@ -654,6 +776,7 @@ def old_optimize_theta(grad_num_tries, grad_max_iter, variational_num_tries, var
 
     theta_init = theta_init_f()
     return scipy.optimize.minimize(F_and_dF_dtheta, theta_init, jac=True)['x']
+
 
 def gaussian_K(theta, xs1, xs2):
 
@@ -732,3 +855,4 @@ def log_det_cov_fs_low_rank(K_inv_factors, lam, log_det_method='vanilla'):
     else:
         assert False
     return -(log_det_S + np.sum(np.log(lam_vec)))
+
